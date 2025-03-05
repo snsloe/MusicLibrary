@@ -1,0 +1,161 @@
+CREATE DATABASE MusicLibrary;
+
+--  Создание таблицы
+CREATE TABLE IF NOT EXISTS public.music_records (
+    record_id SERIAL PRIMARY KEY, 
+    title VARCHAR(100) NOT NULL, 
+    artist VARCHAR(100) NOT NULL, 
+    album VARCHAR(100) NOT NULL, 
+    genre VARCHAR(100) NOT NULL, 
+    duration INT CHECK (duration > 0)
+);
+
+-- Очистка таблицы через функцию
+CREATE OR REPLACE FUNCTION public.clear_records()
+RETURNS VOID AS $$
+BEGIN
+    IF current_user = 'guest_user' THEN
+        RAISE EXCEPTION 'Гость не может очищать таблицу' USING ERRCODE = '42501';
+    END IF;
+
+    DELETE FROM public.music_records;
+
+    PERFORM setval('public.music_records_record_id_seq', 1, false);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Добавление записи
+CREATE OR REPLACE FUNCTION public.add_record(p_title VARCHAR(100), p_artist VARCHAR(100), p_album VARCHAR(100), p_genre VARCHAR(100), p_duration INT) 
+RETURNS VOID AS $$
+BEGIN
+    IF current_user = 'guest_user' THEN
+        RAISE EXCEPTION 'Гость не может добавлять записи' USING ERRCODE = '42501';
+    END IF;
+
+    INSERT INTO public.music_records (title, artist, album, genre, duration) 
+    VALUES (p_title, p_artist, p_album, p_genre, p_duration);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Поиск записи по названию 
+CREATE OR REPLACE FUNCTION public.search_by_title(p_title VARCHAR(100))
+RETURNS TABLE (record_id INT, title VARCHAR, artist VARCHAR, album VARCHAR, genre VARCHAR, duration INT)
+AS $$
+BEGIN
+    RETURN QUERY 
+    SELECT m.record_id, m.title, m.artist, m.album, m.genre, m.duration 
+    FROM public.music_records AS m 
+    WHERE m.title ILIKE '%' || p_title || '%';
+END;
+$$ LANGUAGE plpgsql;
+
+-- Обновление записи
+CREATE OR REPLACE FUNCTION public.update_record(p_record_id INT, p_title VARCHAR(100), p_artist VARCHAR(100), p_album VARCHAR(100), p_genre VARCHAR(100), p_duration INT) 
+RETURNS VOID AS $$
+BEGIN
+    IF current_user = 'guest_user' THEN
+        RAISE EXCEPTION 'Гость не может обновлять записи' USING ERRCODE = '42501';
+    END IF;
+
+    UPDATE public.music_records 
+    SET title = p_title, artist = p_artist, album = p_album, genre = p_genre, duration = p_duration
+    WHERE record_id = p_record_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Удаление записи по названию через функцию
+CREATE OR REPLACE FUNCTION public.delete_by_title(p_title VARCHAR)
+RETURNS INT AS $$
+DECLARE deleted_count INT;
+BEGIN
+    IF current_user = 'guest_user' THEN
+        RAISE EXCEPTION 'Гость не может удалять записи' USING ERRCODE = '42501';
+    END IF;
+
+    DELETE FROM public.music_records WHERE title = p_title RETURNING 1 INTO deleted_count;
+    RETURN COALESCE(deleted_count, 0);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Вывод всех записей
+CREATE OR REPLACE FUNCTION public.get_all_tracks()
+RETURNS TABLE (record_id INT, title VARCHAR, artist VARCHAR, album VARCHAR, genre VARCHAR, duration INT)
+AS $$
+BEGIN
+    RETURN QUERY 
+    SELECT * FROM public.music_records;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Поиск по id
+CREATE OR REPLACE FUNCTION public.search_by_id(p_id INT)
+RETURNS TABLE (record_id INT, title VARCHAR, artist VARCHAR, album VARCHAR, genre VARCHAR, duration INT)
+AS $$
+BEGIN
+    RETURN QUERY 
+    SELECT m.record_id, m.title, m.artist, m.album, m.genre, m.duration 
+    FROM public.music_records AS m 
+    WHERE m.record_id = p_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Инициализация ролей
+CREATE OR REPLACE FUNCTION public.init_roles()
+RETURNS VOID AS $$
+BEGIN
+
+    PERFORM public.fix_table_owners();
+
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'admin_user') THEN
+        CREATE ROLE admin_user LOGIN;
+    END IF;
+    
+    ALTER ROLE admin_user WITH LOGIN;
+
+    GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO admin_user;
+    GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO admin_user;
+    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO admin_user;
+
+    GRANT CREATE ON DATABASE postgres TO admin_user;
+    GRANT TEMPORARY ON DATABASE postgres TO admin_user;
+    ALTER DATABASE MusicLibrary OWNER TO admin_user;
+
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'guest_user') THEN
+        CREATE ROLE guest_user LOGIN;
+    END IF;
+    
+    ALTER ROLE guest_user WITH LOGIN;
+
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO guest_user;
+    GRANT EXECUTE ON FUNCTION public.search_by_title(VARCHAR) TO guest_user;
+    GRANT EXECUTE ON FUNCTION public.get_all_tracks() TO guest_user;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Создание нового пользователя
+CREATE OR REPLACE FUNCTION public.create_new_user(username VARCHAR, user_password VARCHAR, role_name VARCHAR)
+RETURNS VOID AS $$
+DECLARE
+    valid_role VARCHAR;
+BEGIN
+
+    SELECT rolname INTO valid_role FROM pg_roles WHERE rolname = role_name;
+    
+    IF valid_role IS NULL THEN
+        RAISE EXCEPTION 'Указанная роль % не существует', role_name;
+    END IF;
+
+    EXECUTE format('CREATE USER %I WITH PASSWORD %L LOGIN', username, user_password);
+    EXECUTE format('GRANT %I TO %I', role_name, username);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION public.fix_table_owners()
+RETURNS VOID AS $$
+BEGIN
+    IF session_user = 'postgres' THEN
+        ALTER TABLE public.music_records OWNER TO postgres;
+        ALTER SEQUENCE public.music_records_record_id_seq OWNER TO postgres;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
